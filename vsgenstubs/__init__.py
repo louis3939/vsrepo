@@ -7,31 +7,38 @@ import inspect
 import argparse
 import keyword
 import vapoursynth
-from typing import Dict, Sequence, Union, NamedTuple
-
-
-def indent(string: str, spaces: int) -> str:
-    return "\n".join(" "*spaces + line for line in string.splitlines())
-
+from typing import Dict, List, Optional, Sequence, Union, NamedTuple
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--plugin", "-p", action="append", help="Also include manually added plugin")
-parser.add_argument("--avs-plugin", action="append", help="Also include manually added AviSynth plugin.")
-parser.add_argument("--output", "-o", default="@", help="Where to output the file. The special value '-' means output to stdout. The spcial value '@' will install it as a stub-package inside site-packages.")
+parser.add_argument("plugins", type=str, nargs="*", help="Only generate stubs for and inject specified plugin namespaces.")
+parser.add_argument("--load-plugin", "-p", metavar="VS_PLUGIN", action="append", help="Load non-auto-loaded VapourSynth plugin.")
+parser.add_argument("--avs-plugin", "-a", action="append", help="Load AviSynth plugin.")
+parser.add_argument("--output", "-o", help="Where to output the stub package. By default, will attempt to install in site-packages alongside VapourSynth.")
 parser.add_argument("--pyi-template", default=os.path.join(os.path.dirname(__file__), "_vapoursynth.part.pyi"), help="Don't use unless you know what you are doing.")
 
 
 class PluginMeta(NamedTuple):
     name: str
     description: str
-    functions: str
+    unbound: List[str]
+    bound: List[str]
 
 
+class Implementation(NamedTuple):
+    name: str
+    classes: List[str]
 
-def prepare_cores(ns) -> vapoursynth.Core:
+
+class Instance(NamedTuple):
+    name: str
+    unbound: List[str]
+    bound: List[str]
+
+
+def prepare_cores(ns: argparse.Namespace) -> vapoursynth.Core:
     core = vapoursynth.core.core
-    if ns.plugin:
-        for plugin in ns.plugin:
+    if ns.load_plugin:
+        for plugin in ns.load_plugin:
             core.std.LoadPlugin(os.path.abspath(plugin))
 
     if ns.avs_plugin:
@@ -41,30 +48,28 @@ def prepare_cores(ns) -> vapoursynth.Core:
     return core
 
 
-def retrieve_ns_and_funcs(core: vapoursynth.Core, *, bound: bool=False) -> Dict[str, PluginMeta]:
-    result = {}
-
-    base: Union[vapoursynth.Core, vapoursynth.VideoNode] = core
-    if bound:
-        base = core.std.BlankClip()
+def retrieve_ns_and_funcs(core: vapoursynth.Core, *,
+                          plugins: Optional[List[str]] = None) -> List[PluginMeta]:
+    result = []
 
     for v in core.get_plugins().values():
-        result[v["namespace"]] = PluginMeta(
-            v["namespace"],
-            v["name"],
-            "\n".join(retrieve_func_sigs(base, v["namespace"], list(v["functions"].keys())))
-        )
+        if plugins and v["namespace"] not in plugins:
+            continue
+        unbound_sigs = retrieve_func_sigs(core, v["namespace"], v["functions"].keys())
+        bound_sigs = retrieve_func_sigs(core.std.BlankClip(), v["namespace"], v["functions"].keys())
+        result.append(PluginMeta(v["namespace"], v["name"], unbound_sigs, bound_sigs))
+
     return result
 
 
-def retrieve_func_sigs(core: Union[vapoursynth.Core, vapoursynth.VideoNode], ns: str, funcs: Sequence[str]) -> Sequence[str]:
+def retrieve_func_sigs(core: Union[vapoursynth.Core, vapoursynth.VideoNode], ns: str, funcs: Sequence[str]) -> List[str]:
     result = []
     plugin = getattr(core, ns)
     for func in funcs:
         try:
             signature = str(inspect.signature(getattr(plugin, func)))
         except BaseException:
-            signature = "(*args, **kwargs) -> Union[NoneType, VideoNode]"
+            signature = '(*args: typing.Any, **kwargs: typing.Any) -> Optional[VideoNode]'
 
         # Clean up the type annotations so that they are valid python syntax.
         signature = signature.replace("Union", "typing.Union").replace("Sequence", "typing.Sequence")
@@ -87,43 +92,114 @@ def retrieve_func_sigs(core: Union[vapoursynth.Core, vapoursynth.VideoNode], ns:
     return result
 
 
-def make_plugin_classes(suffix: str, sigs: Dict[str, PluginMeta]) -> str:
-    result = []
-    for pname, pfuncs in sigs.items():
-        result.append(f"class _Plugin_{pname}_{suffix}(Plugin):")
-        result.append('    """')
-        result.append('    This class implements the module definitions for the corresponding VapourSynth plugin.')
-        result.append('    This class cannot be imported.')
-        result.append('    """')
-        result.append(pfuncs.functions)
-        result.append("")
-        result.append("")
-    return "\n".join(result)
+def make_implementations(sigs: List[PluginMeta]) -> Dict[str, Implementation]:
+    result: Dict[str, Implementation] = {}
+    for s in sigs:
+        c = [
+            f"# implementation: {s.name}",
+            f"class _Plugin_{s.name}_Unbound(Plugin):",
+            '    """',
+            '    This class implements the module definitions for the corresponding VapourSynth plugin.',
+            '    This class cannot be imported.',
+            '    """',
+            "\n".join(s.unbound),
+            "",
+            "",
+            f"class _Plugin_{s.name}_Bound(Plugin):",
+            '    """',
+            '    This class implements the module definitions for the corresponding VapourSynth plugin.',
+            '    This class cannot be imported.',
+            '    """',
+            "\n".join(s.bound),
+            "# end implementation",
+        ]
+        result[s.name] = Implementation(s.name, c)
+    return result
 
 
-def make_instance_vars(suffix: str, sigs: Dict[str, PluginMeta]) -> str:
-    result = []
-    for pname, pfuncs in sigs.items():
-        result.append("@property")
-        result.append(f"def {pname}(self) -> _Plugin_{pname}_{suffix}:")
-        result.append('    """')
-        result.append(f'    {pfuncs.description}')
-        result.append('    """')
-    return "\n".join(result)
+def make_instances(sigs: List[PluginMeta]) -> Dict[str, Instance]:
+    result: Dict[str, Instance] = {}
+    for s in sigs:
+        unbound = [
+            f"# instance_unbound: {s.name}",
+            "    @property",
+            f"    def {s.name}(self) -> _Plugin_{s.name}_Unbound:",
+            '        """',
+            f'        {s.description}',
+            '        """',
+            f"# end instance",
+        ]
+        bound = [
+            f"# instance_bound: {s.name}",
+            "    @property",
+            f"    def {s.name}(self) -> _Plugin_{s.name}_Bound:",
+            '        """',
+            f'        {s.description}',
+            '        """',
+            f"# end instance",
+        ]
+        result[s.name] = Instance(s.name, unbound, bound)
+    return result
 
 
-def inject_stub_package() -> str:
-    site_package_dir = os.path.dirname(vapoursynth.__file__)
-    stub_dir = os.path.join(site_package_dir, "vapoursynth-stubs")
-    if not os.path.exists(stub_dir):
-        os.makedirs(stub_dir)
-    output_path = os.path.join(stub_dir, "__init__.pyi")
+def get_existing_implementations(path: str) -> Dict[str, Implementation]:
+    result: Dict[str, Implementation] = {}
+    with open(path, "r") as f:
+        current_imp: Optional[str] = None
+        for line in f:
+            line = line.rstrip()
+            if line.startswith("# implementation: "):
+                current_imp = line[len("# implementation: "):]
+                result[current_imp] = Implementation(current_imp, [])
+            if current_imp:
+                result[current_imp].classes.append(line)
+            if line.startswith("# end implementation"):
+                current_imp = None
 
+    return result
+
+
+def get_existing_instances(path: str) -> Dict[str, Instance]:
+    result: Dict[str, Instance] = {}
+    with open(path, "r") as f:
+        current_instance: Optional[str] = None
+        for line in f:
+            line = line.rstrip()
+            if line.startswith("# instance_unbound: "):
+                current_instance = line[len("# instance_unbound: "):]
+                bound = False
+                if current_instance not in result:
+                    result[current_instance] = Instance(current_instance, [], [])
+            if line.startswith("# instance_bound: "):
+                current_instance = line[len("# instance_bound: "):]
+                bound = True
+                if current_instance not in result:
+                    result[current_instance] = Instance(current_instance, [], [])
+            if current_instance:
+                if bound:
+                    result[current_instance].bound.append(line)
+                else:
+                    result[current_instance].unbound.append(line)
+            if line.startswith("# end instance"):
+                current_instance = None
+
+    return result
+
+
+def write_init(path: str) -> None:
+    with open(path, "w") as f:
+        f.write("# flake8: noqa\n")
+        f.write("\n")
+        f.write("from .vapoursynth import *\n")
+
+
+def inject_stub_package(stub_dir: str) -> None:
+    site_package_dir = os.path.normpath(os.path.join(stub_dir, ".."))
     for iname in os.listdir(site_package_dir):
         if iname.startswith("VapourSynth-") and iname.endswith(".dist-info"):
             break
     else:
-        return output_path
+        return
 
     with open(os.path.join(site_package_dir, iname, "RECORD"), "a+", newline="") as f:
         f.seek(0)
@@ -134,41 +210,56 @@ def inject_stub_package() -> str:
                 f.write("\n")
             f.write("vapoursynth-stubs/__init__.pyi,,\n")
 
-    return output_path
 
-def main(argv=None):
+def install_stub_package(stub_dir: str, template: str) -> None:
+    if not os.path.exists(stub_dir):
+        os.makedirs(stub_dir)
+    write_init(os.path.join(stub_dir, "__init__.pyi"))
+    with open(os.path.join(stub_dir, "vapoursynth.pyi"), "w") as f:
+        f.write(template)
+        f.flush()
+    inject_stub_package(stub_dir)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
 
     args = parser.parse_args(args=argv)
     core = prepare_cores(args)
 
-    bound = retrieve_ns_and_funcs(core, bound=True)
-    unbound = retrieve_ns_and_funcs(core, bound=False)
+    install_dir = args.output if args.output else os.path.join(os.path.dirname(vapoursynth.__file__), "vapoursynth-stubs")
+    if not os.path.exists(install_dir):
+        os.makedirs(install_dir)
 
-    implementations = make_plugin_classes("Unbound", unbound) + "\n" + make_plugin_classes("Bound", bound)
+    sigs = retrieve_ns_and_funcs(core, plugins=args.plugins)
 
-    inject_bound = indent(make_instance_vars("Bound", bound), 4)
-    inject_unbound = indent(make_instance_vars("Unbound", unbound), 4)
+    implementations = make_implementations(sigs)
+
+    instances = make_instances(sigs)
+
+    if os.path.isfile(os.path.join(install_dir, "vapoursynth.pyi")):
+        existing_implementations = get_existing_implementations(os.path.join(install_dir, "vapoursynth.pyi"))
+        existing_implementations.update(implementations)
+        implementations = existing_implementations
+
+        existing_instances = get_existing_instances(os.path.join(install_dir, "vapoursynth.pyi"))
+        existing_instances.update(instances)
+        instances = existing_instances
 
     with open(args.pyi_template) as f:
         template = f.read()
 
-    template = template.replace("#include <plugins/implementations>", implementations)
-    template = template.replace("#include <plugins/unbound>", inject_unbound)
-    template = template.replace("#include <plugins/bound>", inject_bound)
+    implementation_inject = "\n\n\n".join(["\n".join(x.classes) for x in sorted(implementations.values(), key=lambda i: i.name)])
+    instance_unbound_inject = "\n".join(["\n".join(x.unbound) for x in sorted(instances.values(), key=lambda i: i.name)])
+    instance_bound_inject = "\n".join(["\n".join(x.bound) for x in sorted(instances.values(), key=lambda i: i.name)])
 
-    if args.output == "-":
-        f = sys.stdout
-    elif args.output == "@":
-        stub_path = inject_stub_package()
-        f = open(stub_path, "w")
-    else:
-        f = open(args.output, "w")
+    template = template.replace("#include <plugins/implementations>", implementation_inject)
+    template = template.replace("#include <plugins/unbound>", instance_unbound_inject)
+    template = template.replace("#include <plugins/bound>", instance_bound_inject)
 
-    with f:
-        f.write(template)
-        f.flush()
+    install_stub_package(install_dir, template)
+
 
 if __name__ == "__main__":
     main(sys.argv[1:])
