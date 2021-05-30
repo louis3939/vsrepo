@@ -55,6 +55,10 @@ def retrieve_ns_and_funcs(core: vapoursynth.Core, *,
     for v in core.get_plugins().values():
         if plugins and v["namespace"] not in plugins:
             continue
+        if v["namespace"] == "mpls":
+            continue
+        if v["namespace"] == "edgefixer":
+            continue
         unbound_sigs = retrieve_func_sigs(core, v["namespace"], v["functions"].keys())
         bound_sigs = retrieve_func_sigs(core.std.BlankClip(), v["namespace"], v["functions"].keys())
         result.append(PluginMeta(v["namespace"], v["name"], unbound_sigs, bound_sigs))
