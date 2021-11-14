@@ -624,7 +624,7 @@ class Function:
 
 
 class VideoNode:
-#include <plugins_vnode/bound>
+#include <plugins/bound/VideoNode>
 
     format: typing.Optional[VideoFormat]
 
@@ -673,7 +673,7 @@ class AudioFrame(_RawFrame):
 
 
 class AudioNode:
-#include <plugins_anode/bound>
+#include <plugins/bound/AudioNode>
 
     sample_type: SampleType
     bits_per_sample: int
@@ -716,7 +716,7 @@ class LogHandle:
 
 
 class Core:
-#include <plugins/unbound>
+#include <plugins/bound/Core>
 
     @property
     def num_threads(self) -> int: ...
