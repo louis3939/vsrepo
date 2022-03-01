@@ -7,7 +7,7 @@ import inspect
 import argparse
 import keyword
 import vapoursynth
-from typing import Dict, List, Optional, Sequence, Union, NamedTuple
+from typing import Any, Dict, List, Optional, Sequence, Union, NamedTuple, cast
 
 parser = argparse.ArgumentParser()
 parser.add_argument("plugins", type=str, nargs="*", help="Only generate stubs for and inject specified plugin namespaces.")
@@ -43,7 +43,10 @@ def prepare_cores(ns: argparse.Namespace) -> vapoursynth.Core:
 
     if ns.avs_plugin:
         for plugin in ns.avs_plugin:
-            core.avs.LoadPlugin(os.path.abspath(plugin))
+            if hasattr(core, "avs"):
+                cast(Any, core).avs.LoadPlugin(os.path.abspath(plugin))
+            else:
+                raise AttributeError("Core is missing avs plugin!")
 
     return core
 
@@ -59,8 +62,8 @@ def retrieve_ns_and_funcs(core: vapoursynth.Core, *,
             continue
         if v["namespace"] == "edgefixer":
             continue
-        unbound_sigs = retrieve_func_sigs(core, v["namespace"], v["functions"].keys())
-        bound_sigs = retrieve_func_sigs(core.std.BlankClip(), v["namespace"], v["functions"].keys())
+        unbound_sigs = retrieve_func_sigs(core, v["namespace"], list(v["functions"].keys()))
+        bound_sigs = retrieve_func_sigs(core.std.BlankClip(), v["namespace"], list(v["functions"].keys()))
         result.append(PluginMeta(v["namespace"], v["name"], unbound_sigs, bound_sigs))
 
     return result

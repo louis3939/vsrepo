@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import vapoursynth
-from typing import Any, Dict, List, Optional, Sequence, NamedTuple, Union
+from typing import Any, Dict, List, Optional, Sequence, NamedTuple, Union, cast
 
 parser = argparse.ArgumentParser()
 parser.add_argument("plugins", type=str, nargs="*",
@@ -49,7 +49,10 @@ def prepare_cores(ns: argparse.Namespace) -> vapoursynth.Core:
 
     if ns.avs_plugin:
         for plugin in ns.avs_plugin:
-            core.avs.LoadPlugin(os.path.abspath(plugin))
+            if hasattr(core, "avs"):
+                cast(Any, core).avs.LoadPlugin(os.path.abspath(plugin))
+            else:
+                raise AttributeError("Core is missing avs plugin!")
 
     return core
 
@@ -62,7 +65,8 @@ def retrieve_ns_and_funcs(core: vapoursynth.Core, *,
         if plugins and p.namespace not in plugins:
             continue
         bound = {}
-        for c in (core, core.std.BlankClip(), core.std.BlankAudio()):
+        cores: Sequence[CoreLike] = (core, core.std.BlankClip(), core.std.BlankAudio())
+        for c in cores:
             sigs = retrieve_func_sigs(c, p.namespace)
             if sigs:
                 bound[c.__class__.__name__] = sigs
